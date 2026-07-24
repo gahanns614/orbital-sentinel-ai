@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrbitalSentinelTelemetryFrame",
+  "description": "One telemetry frame emitted by the satellite simulator. This is the frozen contract that the simulator, ML pipeline, backend, and frontend all build against. Do not change field names without a team sync — everything downstream depends on this shape.",
+  "type": "object",
+  "required": ["timestamp", "satellite_id", "mode", "orbit", "power", "thermal", "compute", "comms", "command_stream", "security"],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of this frame"
+    },
+    "satellite_id": {
+      "type": "string",
+      "example": "sentinel-1"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["normal", "attack", "natural_anomaly"],
+      "description": "Ground-truth generation mode. natural_anomaly reserved for Phase 2 (solar/eclipse/radiation events) — MVP only emits normal/attack."
+    },
+    "orbit": {
+      "type": "object",
+      "required": ["lat", "lon", "alt_km"],
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "alt_km": { "type": "number", "minimum": 160, "maximum": 2000 }
+      }
+    },
+    "power": {
+      "type": "object",
+      "required": ["battery_pct", "solar_efficiency", "fuel_pct"],
+      "properties": {
+        "battery_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "solar_efficiency": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fuel_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "thermal": {
+      "type": "object",
+      "required": ["temp_c"],
+      "properties": {
+        "temp_c": { "type": "number", "minimum": -100, "maximum": 150 }
+      }
+    },
+    "compute": {
+      "type": "object",
+      "required": ["cpu_pct", "mem_pct"],
+      "properties": {
+        "cpu_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "mem_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "comms": {
+      "type": "object",
+      "required": ["signal_dbm", "snr_db", "noise_floor_db", "frequency_mhz", "latency_ms", "packet_loss_pct"],
+      "properties": {
+        "signal_dbm": { "type": "number", "description": "Received signal strength, dBm. Nominal ~ -80 to -70." },
+        "snr_db": { "type": "number", "description": "Signal-to-noise ratio, dB. Nominal ~ 10-20." },
+        "noise_floor_db": { "type": "number" },
+        "frequency_mhz": { "type": "number", "description": "Nominal downlink frequency with small natural drift." },
+        "latency_ms": { "type": "number", "minimum": 0 },
+        "packet_loss_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "command_stream": {
+      "type": "object",
+      "required": ["seq", "checksum", "auth_token"],
+      "properties": {
+        "seq": { "type": "integer", "description": "Monotonically increasing sequence number. Repeats/gaps are attack signatures." },
+        "checksum": { "type": "string" },
+        "auth_token": { "type": "string" }
+      }
+    },
+    "security": {
+      "type": "object",
+      "required": ["auth_failures_last_min", "active_sessions"],
+      "properties": {
+        "auth_failures_last_min": { "type": "integer", "minimum": 0 },
+        "active_sessions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "STRETCH GOAL (Phase 2) — natural space-condition fields. Not required for MVP frames.",
+      "properties": {
+        "solar_activity_index": { "type": "number", "minimum": 0, "maximum": 10 },
+        "in_eclipse": { "type": "boolean" },
+        "radiation_level": { "type": "string", "enum": ["nominal", "elevated", "storm"] }
+      }
+    },
+    "attack_label": {
+      "type": ["string", "null"],
+      "description": "Ground truth label, only populated when generating labeled training data. Null/absent in live inference frames."
+    }
+  }
+}
