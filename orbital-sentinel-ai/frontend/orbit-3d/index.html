@@ -56,6 +56,10 @@
   <div class="row"><span class="label">Battery</span><span class="value" id="hud-battery">87%</span></div>
   <div class="row"><span class="label">Altitude</span><span class="value" id="hud-alt">550 km</span></div>
   <div class="row"><span class="label">Auth failures/min</span><span class="value" id="hud-authfail">0</span></div>
+  <div class="row" style="border-top: 1px solid rgba(80,160,255,0.15); margin-top: 6px; padding-top: 6px;">
+    <span class="label">AI Risk Score</span><span class="value" id="hud-riskscore">--</span>
+  </div>
+  <div class="row"><span class="label">AI Prediction</span><span class="value" id="hud-aiprediction">--</span></div>
 </div>
 
 <div id="live-badge" class="disconnected">LIVE: connecting...</div>
@@ -301,12 +305,13 @@ const state = {
   authFailures: 0,
   liveData: false,  // true once real frames start arriving over WebSocket (drives attack/telemetry state only)
   altKm: 550,       // real altitude from the simulator, used for visual scale + HUD (orbital position itself is computed continuously, see propagateLEO)
+  aiRisk: null,     // real ML risk-scoring output from the backend, null until first enriched frame arrives
 };
 
 // ---------- live connection to the real simulator (via ws_bridge.py) ----------
 // Chain: scenario_runner.py / event_publisher.py -> Redis -> ws_bridge.py -> here.
 // Falls back silently to the manual demo buttons if no bridge is running.
-const WS_URL = "ws://localhost:8765";
+const WS_URL = "ws://localhost:8000/ws/live"; // real backend (was the demo ws_bridge.py on 8765)
 let ws;
 const liveBadge = document.getElementById("live-badge");
 
@@ -366,6 +371,9 @@ function applyLiveFrame(frame) {
     state.mode = ATTACK_LABEL_TO_MODE[frame.attack_label] || "anomaly";
   }
   state.attackLabel = frame.attack_label || null;
+  // real ML output from the backend's risk-scoring fusion (Day 13-15) --
+  // absent if somehow connected to a non-enriching source, handled gracefully
+  state.aiRisk = frame.risk || null;
 }
 
 connectLive();
@@ -405,6 +413,8 @@ const hudSnr = document.getElementById("hud-snr");
 const hudBattery = document.getElementById("hud-battery");
 const hudAlt = document.getElementById("hud-alt");
 const hudAuthFail = document.getElementById("hud-authfail");
+const hudRiskScore = document.getElementById("hud-riskscore");
+const hudAiPrediction = document.getElementById("hud-aiprediction");
 
 function updateHUD() {
   const isAttack = state.mode !== "normal";
@@ -425,6 +435,20 @@ function updateHUD() {
   hudAlt.textContent = state.altKm.toFixed(1) + " km";
   hudAuthFail.textContent = Math.round(state.authFailures);
   hudAuthFail.className = "value " + (state.authFailures > 5 ? "attack" : "normal");
+
+  // real ML output (only present when connected to the actual backend,
+  // not the raw simulator/bridge) -- shows genuine model output rather
+  // than the ground-truth label, which is the point of having a real backend
+  if (state.aiRisk) {
+    const r = state.aiRisk;
+    hudRiskScore.textContent = `${r.risk_score} (${r.risk_level})`;
+    hudRiskScore.className = "value " + (r.risk_level === "HIGH" || r.risk_level === "CRITICAL" ? "attack" : "normal");
+    hudAiPrediction.textContent = `${r.predicted_attack} (${Math.round(r.classifier_confidence * 100)}%)`;
+    hudAiPrediction.className = "value " + (r.predicted_attack !== "normal" ? "attack" : "normal");
+  } else {
+    hudRiskScore.textContent = "--";
+    hudAiPrediction.textContent = "--";
+  }
 }
 
 // ---------- attack trigger buttons ----------

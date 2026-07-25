@@ -22,6 +22,14 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "ml"))
 from risk_scoring import RiskScorer, risk_level_for_score  # noqa: E402
 
+try:
+    from .report_service import generate_report
+except ImportError:
+    # fallback for running this file standalone/from a test harness
+    # rather than as part of the `services` package
+    sys.path.insert(0, str(Path(__file__).parent))
+    from report_service import generate_report
+
 STREAM_NAME = "telemetry_frames"
 ALERT_TRIGGER_LEVELS = {"HIGH", "CRITICAL"}
 MAX_ALERT_HISTORY = 200
@@ -70,6 +78,18 @@ class InferenceService:
                 "status": "active",
                 "satellite_id": enriched_frame.get("satellite_id"),
             }
+            # AI report generation happens once per NEW alert, not per
+            # frame -- keeps API calls infrequent (only on state
+            # transitions) rather than on every single scored frame.
+            # NOTE: this is a synchronous/blocking call for simplicity;
+            # if it visibly stalls the inference loop during a demo,
+            # move it to a background task -- flagging honestly rather
+            # than over-engineering async here under time pressure.
+            report_result = generate_report(alert)
+            alert["ai_report"] = report_result["report"]
+            alert["ai_mitigation"] = report_result["mitigation"]
+            alert["report_source"] = report_result["source"]
+
             self.alerts.append(alert)
             self.alerts = self.alerts[-MAX_ALERT_HISTORY:]
             self._open_alert = alert
