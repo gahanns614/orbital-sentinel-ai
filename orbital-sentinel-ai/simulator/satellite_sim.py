@@ -1,11 +1,21 @@
 """
 ORBITAL SENTINEL AI — satellite_sim.py
-Day 1 scope: emit one NORMAL-mode telemetry frame per second, matching
-data/schemas/telemetry_frame.schema.json exactly.
+Emits telemetry frames matching data/schemas/telemetry_frame.schema.json.
 
-No Redis, no DB, no attacks yet — this script's only job today is to prove
-the schema produces realistic-looking data. Attack injection, streaming,
-and orbital propagation (sgp4) get layered on in later days per the plan.
+Orbit is now driven by real two-body Keplerian orbital mechanics for a
+LEO (Low Earth Orbit) satellite -- not a random walk. Position is computed
+from actual physics: semi-major axis, inclination, mean motion (Kepler's
+third law), and Earth's rotation underneath the orbit. This produces a
+real ground-track pattern (the characteristic westward-shifting sine wave
+you see on satellite tracking sites), with latitude bounded exactly by
+the orbital inclination and a correct ~95 minute period at 550km altitude.
+
+DEMO TIME ACCELERATION: a real 550km LEO orbit takes ~95.5 minutes to
+complete -- too slow to be watchable live. TIME_SCALE compresses simulated
+orbital time relative to wall-clock time (default 60x => a full orbit
+plays out in ~95 seconds). The physics itself is unmodified; only the
+rate at which simulated time advances is scaled. Set TIME_SCALE = 1.0
+for real-time-accurate orbital motion.
 
 Run:
     python simulator/satellite_sim.py
@@ -14,6 +24,7 @@ Run:
 
 import argparse
 import json
+import math
 import random
 import time
 from datetime import datetime, timezone
@@ -46,16 +57,82 @@ class MeanRevertingWalk:
         return round(self.value, 3)
 
 
+class LEOOrbit:
+    """
+    Real two-body Keplerian propagator for a circular LEO orbit.
+    No external dependencies (no sgp4/skyfield needed) -- this is the
+    actual orbital mechanics math, self-contained.
+
+    Circular-orbit assumption is standard for LEO comms/imaging satellites
+    (eccentricity ~0 in practice), which keeps this exact rather than an
+    approximation, while skipping full elliptical-orbit complexity that
+    wouldn't add anything visible for this mission profile.
+    """
+
+    MU_EARTH = 398600.4418      # km^3/s^2, standard gravitational parameter
+    R_EARTH = 6371.0            # km, mean Earth radius
+    OMEGA_EARTH = 7.2921159e-5  # rad/s, sidereal Earth rotation rate
+
+    def __init__(self, altitude_km: float = 550.0, inclination_deg: float = 53.0,
+                 raan_deg: float = 0.0, mean_anomaly0_deg: float = 0.0,
+                 time_scale: float = 60.0):
+        self.altitude_km = altitude_km
+        self.a = self.R_EARTH + altitude_km          # semi-major axis
+        self.inc = math.radians(inclination_deg)
+        self.raan = math.radians(raan_deg)
+        self.M0 = math.radians(mean_anomaly0_deg)
+        self.n = math.sqrt(self.MU_EARTH / self.a ** 3)  # mean motion, rad/s
+        self.period_s = 2 * math.pi / self.n
+        self.time_scale = time_scale
+
+    def position_at(self, wall_clock_elapsed_s: float):
+        """Return (lat_deg, lon_deg, alt_km) at the given elapsed wall-clock
+        time, with TIME_SCALE applied to compress the orbit into a
+        demo-friendly duration."""
+        t = wall_clock_elapsed_s * self.time_scale
+
+        M = self.M0 + self.n * t
+        x_orb, y_orb = self.a * math.cos(M), self.a * math.sin(M)
+
+        # rotate by inclination about the line of nodes
+        x1 = x_orb
+        y1 = y_orb * math.cos(self.inc)
+        z1 = y_orb * math.sin(self.inc)
+
+        # rotate by RAAN into the Earth-Centered Inertial (ECI) frame
+        x_eci = x1 * math.cos(self.raan) - y1 * math.sin(self.raan)
+        y_eci = x1 * math.sin(self.raan) + y1 * math.cos(self.raan)
+        z_eci = z1
+
+        # rotate into Earth-Centered Earth-Fixed (ECEF) to account for
+        # Earth spinning underneath the orbit -- this is what produces the
+        # realistic westward ground-track drift orbit-to-orbit.
+        theta_g = self.OMEGA_EARTH * t
+        x = x_eci * math.cos(theta_g) + y_eci * math.sin(theta_g)
+        y = -x_eci * math.sin(theta_g) + y_eci * math.cos(theta_g)
+        z = z_eci
+
+        r = math.sqrt(x * x + y * y + z * z)
+        lat = math.degrees(math.asin(z / r))
+        lon = math.degrees(math.atan2(y, x))
+        alt = r - self.R_EARTH
+        return lat, lon, alt
+
+
 class SatelliteSimulator:
     def __init__(self, satellite_id: str = "sentinel-1"):
         self.satellite_id = satellite_id
         self.seq = 10000
+        self.start_time = time.time()
 
-        # Orbit: simple placeholder walk for Day 1. Replaced with real
-        # sgp4/skyfield Keplerian propagation once orbit accuracy matters.
-        self.lat = MeanRevertingWalk(0, 0.8, floor=-90, ceiling=90)
-        self.lon = MeanRevertingWalk(0, 1.2, floor=-180, ceiling=180)
-        self.alt = MeanRevertingWalk(550, 0.5, floor=500, ceiling=600)
+        # Real Keplerian LEO orbit: 550km altitude, 53deg inclination
+        # (Starlink-like), ~95.5 min real orbital period, compressed 60x
+        # for demo purposes (see TIME_SCALE note in module docstring).
+        self.orbit = LEOOrbit(altitude_km=550.0, inclination_deg=53.0, time_scale=60.0)
+        # small realistic altitude jitter (atmospheric drag / station-keeping
+        # noise) layered on top of the exact physics -- kept tiny so it
+        # doesn't distort the propagation.
+        self.alt_jitter = MeanRevertingWalk(0, 0.05, floor=-1.5, ceiling=1.5)
 
         self.battery = MeanRevertingWalk(87, 0.3, floor=0, ceiling=100)
         self.solar_eff = MeanRevertingWalk(0.91, 0.01, floor=0, ceiling=1)
@@ -75,14 +152,18 @@ class SatelliteSimulator:
 
     def next_frame(self) -> dict:
         self.seq += 1
+        elapsed = time.time() - self.start_time
+        lat, lon, alt = self.orbit.position_at(elapsed)
+        alt += self.alt_jitter.step()
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "satellite_id": self.satellite_id,
             "mode": "normal",
             "orbit": {
-                "lat": self.lat.step(),
-                "lon": self.lon.step(),
-                "alt_km": self.alt.step(),
+                "lat": round(lat, 4),
+                "lon": round(lon, 4),
+                "alt_km": round(alt, 2),
             },
             "power": {
                 "battery_pct": self.battery.step(),

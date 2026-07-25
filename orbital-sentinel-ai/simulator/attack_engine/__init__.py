@@ -1,4 +1,4 @@
-from .comms_attacks import SignalJamming, SignalSpoofing
+from .comms_attacks import SignalJamming, SignalSpoofing, CommLinkDegradation
 from .cyber_attacks import ReplayAttack
 from .network_attacks import DDoSAttack
 from .security_attacks import BruteForceAttack
@@ -9,10 +9,11 @@ from .security_attacks import BruteForceAttack
 ATTACK_REGISTRY = {
     SignalJamming.name: SignalJamming,
     SignalSpoofing.name: SignalSpoofing,
+    CommLinkDegradation.name: CommLinkDegradation,
     ReplayAttack.name: ReplayAttack,
     DDoSAttack.name: DDoSAttack,
     BruteForceAttack.name: BruteForceAttack,
 }
 
-__all__ = ["ATTACK_REGISTRY", "SignalJamming", "SignalSpoofing", "ReplayAttack",
-           "DDoSAttack", "BruteForceAttack"]
+__all__ = ["ATTACK_REGISTRY", "SignalJamming", "SignalSpoofing", "CommLinkDegradation",
+           "ReplayAttack", "DDoSAttack", "BruteForceAttack"]

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Orbital Sentinel AI — 3D Mission View</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #050810; font-family: -apple-system, Segoe UI, sans-serif; }
+  #scene-container { width: 100vw; height: 100vh; display: block; }
+
+  #hud {
+    position: absolute; top: 16px; left: 16px; color: #cfe8ff;
+    background: rgba(6, 12, 24, 0.65); border: 1px solid rgba(80, 160, 255, 0.25);
+    border-radius: 8px; padding: 12px 16px; font-size: 13px; line-height: 1.6;
+    backdrop-filter: blur(4px); min-width: 220px;
+  }
+  #hud .title { font-size: 14px; font-weight: 600; color: #7fd1ff; margin-bottom: 6px; letter-spacing: 0.5px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+  #hud .label { color: #7d92ad; }
+  #hud .value { color: #eaf6ff; font-variant-numeric: tabular-nums; }
+  #hud .value.attack { color: #ff6b6b; }
+  #hud .value.normal { color: #4ee8a0; }
+
+  #live-badge {
+    position: absolute; top: 16px; left: 260px; font-size: 11px;
+    padding: 4px 10px; border-radius: 12px; letter-spacing: 0.3px;
+  }
+  #live-badge.connected { background: rgba(78, 232, 160, 0.15); color: #4ee8a0; border: 1px solid rgba(78, 232, 160, 0.4); }
+  #live-badge.disconnected { background: rgba(255, 107, 107, 0.1); color: #ff9d9d; border: 1px solid rgba(255, 107, 107, 0.3); }
+
+  #controls-hint {
+    position: absolute; bottom: 16px; left: 16px; color: #7d92ad;
+    font-size: 12px; background: rgba(6, 12, 24, 0.5); padding: 8px 12px; border-radius: 6px;
+  }
+
+  #attack-buttons {
+    position: absolute; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  #attack-buttons button {
+    background: rgba(6, 12, 24, 0.75); color: #cfe8ff; border: 1px solid rgba(80, 160, 255, 0.3);
+    border-radius: 6px; padding: 8px 14px; font-size: 12px; cursor: pointer; text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #attack-buttons button:hover { background: rgba(80, 160, 255, 0.15); border-color: rgba(80, 160, 255, 0.6); }
+  #attack-buttons button.active { background: rgba(255, 80, 80, 0.2); border-color: #ff6b6b; color: #ffb3b3; }
+</style>
+</head>
+<body>
+
+<div id="scene-container"></div>
+
+<div id="hud">
+  <div class="title">SENTINEL-1 · MISSION VIEW</div>
+  <div class="row"><span class="label">Status</span><span class="value normal" id="hud-status">NOMINAL</span></div>
+  <div class="row"><span class="label">Signal</span><span class="value" id="hud-signal">-82.0 dBm</span></div>
+  <div class="row"><span class="label">SNR</span><span class="value" id="hud-snr">14.0 dB</span></div>
+  <div class="row"><span class="label">Battery</span><span class="value" id="hud-battery">87%</span></div>
+  <div class="row"><span class="label">Altitude</span><span class="value" id="hud-alt">550 km</span></div>
+  <div class="row"><span class="label">Auth failures/min</span><span class="value" id="hud-authfail">0</span></div>
+</div>
+
+<div id="live-badge" class="disconnected">LIVE: connecting...</div>
+
+<div id="attack-buttons">
+  <button id="btn-normal" class="active">Normal operation</button>
+  <button id="btn-jam">Trigger: Signal jamming</button>
+  <button id="btn-blackout">Trigger: Comm blackout</button>
+  <button id="btn-bruteforce">Trigger: Brute force</button>
+</div>
+
+<div id="controls-hint">Drag to rotate · Scroll to zoom · Right-drag to pan<br>Buttons below are for offline demo only — live simulator data overrides them automatically.</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ---------- basic scene setup ----------
+const container = document.getElementById("scene-container");
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x03050a);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 6, 16);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 6;
+controls.maxDistance = 40;
+
+// ---------- starfield ----------
+function buildStarfield() {
+  const starGeo = new THREE.BufferGeometry();
+  const count = 2000;
+  const positions = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const r = 200 + Math.random() * 300;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[i * 3 + 2] = r * Math.cos(phi);
+  }
+  starGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.6, sizeAttenuation: true });
+  scene.add(new THREE.Points(starGeo, starMat));
+}
+buildStarfield();
+
+// ---------- lighting (sun + ambient fill) ----------
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(30, 10, 20);
+scene.add(sun);
+
+const ambient = new THREE.AmbientLight(0x2a3a55, 0.6);
+scene.add(ambient);
+
+// ---------- Earth ----------
+const EARTH_RADIUS = 4;
+const textureLoader = new THREE.TextureLoader();
+const earthGeo = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
+const earthMat = new THREE.MeshStandardMaterial({
+  color: 0x2255aa,
+  roughness: 0.85,
+  metalness: 0.1,
+});
+// Try loading a real earth texture; falls back to flat color material above if network/CDN blocks it.
+textureLoader.load(
+  "https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg",
+  (tex) => { earthMat.map = tex; earthMat.color.set(0xffffff); earthMat.needsUpdate = true; },
+  undefined,
+  () => { /* silent fallback to flat blue material */ }
+);
+const earth = new THREE.Mesh(earthGeo, earthMat);
+scene.add(earth);
+
+// subtle atmosphere glow shell
+const atmoGeo = new THREE.SphereGeometry(EARTH_RADIUS * 1.03, 64, 64);
+const atmoMat = new THREE.MeshBasicMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.12, side: THREE.BackSide });
+scene.add(new THREE.Mesh(atmoGeo, atmoMat));
+
+// converts real lat/lon/altitude into a 3D position on/above the Earth
+// mesh. Altitude is visually exaggerated (real 550km vs Earth's 6371km
+// radius would put the satellite almost touching the surface) but scales
+// proportionally, clamped to a sane visual range.
+function latLonAltToVector3(latDeg, lonDeg, altKm) {
+  const latRad = THREE.MathUtils.degToRad(latDeg);
+  const lonRad = THREE.MathUtils.degToRad(lonDeg);
+  const visualAltOffset = THREE.MathUtils.clamp((altKm / 550) * 2.2, 1.2, 4.0);
+  const r = EARTH_RADIUS + visualAltOffset;
+  const x = r * Math.cos(latRad) * Math.cos(lonRad);
+  const y = r * Math.sin(latRad);
+  const z = r * Math.cos(latRad) * Math.sin(lonRad);
+  return new THREE.Vector3(x, y, z);
+}
+
+// ---------- continuous, connection-independent orbital motion ----------
+// A real satellite keeps physically orbiting whether or not a ground
+// station is currently receiving telemetry from it. This mirrors that:
+// it's the SAME two-body Keplerian math as satellite_sim.py's LEOOrbit
+// class (550km altitude, 53deg inclination, real ~95.5min period, 60x
+// demo time acceleration), running continuously in the browser off the
+// page's own clock -- NOT dependent on WebSocket frames arriving.
+// Live data (when connected) only drives attack/telemetry state below;
+// it no longer gates whether the satellite moves.
+const LEO = {
+  MU_EARTH: 398600.4418,
+  R_EARTH: 6371.0,
+  OMEGA_EARTH: 7.2921159e-5,
+  altitudeKm: 550.0,
+  incRad: THREE.MathUtils.degToRad(53.0),
+  timeScale: 60.0,
+};
+LEO.a = LEO.R_EARTH + LEO.altitudeKm;
+LEO.n = Math.sqrt(LEO.MU_EARTH / Math.pow(LEO.a, 3)); // mean motion, rad/s
+
+function propagateLEO(pageElapsedSeconds) {
+  const t = pageElapsedSeconds * LEO.timeScale;
+  const M = LEO.n * t;
+  const xOrb = LEO.a * Math.cos(M);
+  const yOrb = LEO.a * Math.sin(M);
+  const x1 = xOrb;
+  const y1 = yOrb * Math.cos(LEO.incRad);
+  const z1 = yOrb * Math.sin(LEO.incRad);
+  const thetaG = LEO.OMEGA_EARTH * t; // Earth's rotation underneath the orbit
+  const x = x1 * Math.cos(thetaG) + y1 * Math.sin(thetaG);
+  const y = -x1 * Math.sin(thetaG) + y1 * Math.cos(thetaG);
+  const z = z1;
+  const r = Math.sqrt(x * x + y * y + z * z);
+  const lat = THREE.MathUtils.radToDeg(Math.asin(z / r));
+  const lon = THREE.MathUtils.radToDeg(Math.atan2(y, x));
+  return { lat, lon };
+}
+
+// ---------- live ground-track trail ----------
+// A static ring here would be misleading: because Earth's rotation is
+// baked into the satellite's Earth-fixed lat/lon (see propagateLEO), the
+// REAL path drifts westward each orbit rather than retracing a fixed
+// circle -- exactly like real satellite tracking sites (n2yo, Heavens-
+// Above) show. So instead of a fixed decorative ring, we draw a live
+// fading trail of the satellite's actual recent positions, which stays
+// accurate no matter how far the ground track has drifted.
+const TRAIL_LENGTH = 500;
+const trailPositions = new Float32Array(TRAIL_LENGTH * 3);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPositions, 3));
+trailGeo.setDrawRange(0, 0);
+const trailMat = new THREE.LineBasicMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.45 });
+const trailLine = new THREE.Line(trailGeo, trailMat);
+scene.add(trailLine);
+
+let trailCount = 0;
+function pushTrailPoint(vec3) {
+  if (trailCount < TRAIL_LENGTH) {
+    trailPositions[trailCount * 3] = vec3.x;
+    trailPositions[trailCount * 3 + 1] = vec3.y;
+    trailPositions[trailCount * 3 + 2] = vec3.z;
+    trailCount++;
+    trailGeo.setDrawRange(0, trailCount);
+  } else {
+    // shift everything back by one point, append newest at the end --
+    // simple ring-buffer behavior so the trail only shows recent history
+    trailPositions.copyWithin(0, 3);
+    trailPositions[(TRAIL_LENGTH - 1) * 3] = vec3.x;
+    trailPositions[(TRAIL_LENGTH - 1) * 3 + 1] = vec3.y;
+    trailPositions[(TRAIL_LENGTH - 1) * 3 + 2] = vec3.z;
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+}
+
+// ---------- satellite (built from primitives, no external model files) ----------
+function buildSatellite() {
+  const group = new THREE.Group();
+
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd9d9d9, metalness: 0.6, roughness: 0.35 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.3), bodyMat);
+  group.add(body);
+
+  const panelMat = new THREE.MeshStandardMaterial({ color: 0x1c3f7a, metalness: 0.4, roughness: 0.5, emissive: 0x0a1c3a, emissiveIntensity: 0.3 });
+  const panelGeo = new THREE.BoxGeometry(1.1, 0.03, 0.5);
+  const panelL = new THREE.Mesh(panelGeo, panelMat);
+  panelL.position.set(-0.85, 0, 0);
+  const panelR = new THREE.Mesh(panelGeo, panelMat);
+  panelR.position.set(0.85, 0, 0);
+  group.add(panelL, panelR);
+
+  const antennaMat = new THREE.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.7, roughness: 0.3 });
+  const dish = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.18, 16, 1, true), antennaMat);
+  dish.rotation.x = Math.PI;
+  dish.position.set(0, 0.05, 0.28);
+  group.add(dish);
+
+  // signal pulse ring (used during attacks to visualize disruption)
+  const pulseGeo = new THREE.RingGeometry(0.15, 0.17, 32);
+  const pulseMat = new THREE.MeshBasicMaterial({ color: 0x4ee8a0, transparent: true, opacity: 0, side: THREE.DoubleSide });
+  const pulse = new THREE.Mesh(pulseGeo, pulseMat);
+  pulse.position.set(0, 0.05, 0.28);
+  group.add(pulse);
+  group.userData.pulse = pulse;
+
+  // intrusion-attempt markers: small dots that flicker near the antenna
+  // during a brute-force attack -- deliberately NOT the same visual as the
+  // jamming/blackout pulse ring, since brute force is an auth attack, not
+  // a signal-quality attack, and should read as visually distinct.
+  const markerGroup = new THREE.Group();
+  const markerMat = new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0 });
+  for (let i = 0; i < 5; i++) {
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.02, 8, 8), markerMat.clone());
+    const angle = (i / 5) * Math.PI * 2;
+    dot.position.set(Math.cos(angle) * 0.22, 0.05 + Math.sin(angle) * 0.22, 0.28);
+    markerGroup.add(dot);
+  }
+  group.add(markerGroup);
+  group.userData.intrusionMarkers = markerGroup;
+
+  return group;
+}
+
+const satellite = buildSatellite();
+scene.add(satellite);
+
+// ---------- state (wire this to the real event bus / API later) ----------
+const state = {
+  mode: "normal",   // normal | jamming | blackout | brute_force | replay_attack | signal_spoofing | ddos
+  signal: -82,
+  snr: 14,
+  battery: 87,
+  authFailures: 0,
+  liveData: false,  // true once real frames start arriving over WebSocket (drives attack/telemetry state only)
+  altKm: 550,       // real altitude from the simulator, used for visual scale + HUD (orbital position itself is computed continuously, see propagateLEO)
+};
+
+// ---------- live connection to the real simulator (via ws_bridge.py) ----------
+// Chain: scenario_runner.py / event_publisher.py -> Redis -> ws_bridge.py -> here.
+// Falls back silently to the manual demo buttons if no bridge is running.
+const WS_URL = "ws://localhost:8765";
+let ws;
+const liveBadge = document.getElementById("live-badge");
+
+function connectLive() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    state.liveData = true;
+    liveBadge.textContent = "LIVE: connected to simulator";
+    liveBadge.className = "connected";
+  };
+  ws.onclose = () => {
+    state.liveData = false;
+    liveBadge.textContent = "LIVE: not connected (using demo buttons)";
+    liveBadge.className = "disconnected";
+    setTimeout(connectLive, 3000); // keep retrying
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (event) => {
+    try {
+      const frame = JSON.parse(event.data);
+      applyLiveFrame(frame);
+    } catch (e) { /* ignore malformed frame */ }
+  };
+}
+
+// map the real attack_label from the simulator onto the 3D view's mode
+// vocabulary. Attacks not yet given a bespoke visual fall back to a
+// generic "anomaly" pulse so nothing silently does nothing.
+const ATTACK_LABEL_TO_MODE = {
+  signal_jamming: "jamming",
+  signal_spoofing: "spoofing",
+  replay_attack: "replay",
+  ddos: "ddos",
+  brute_force: "brute_force",
+};
+
+function applyLiveFrame(frame) {
+  const comms = frame.comms || {};
+  const security = frame.security || {};
+  const power = frame.power || {};
+  const orbit = frame.orbit || {};
+
+  state.signal = typeof comms.signal_dbm === "number" ? comms.signal_dbm : state.signal;
+  state.snr = typeof comms.snr_db === "number" ? comms.snr_db : state.snr;
+  state.battery = typeof power.battery_pct === "number" ? power.battery_pct : state.battery;
+  state.authFailures = typeof security.auth_failures_last_min === "number" ? security.auth_failures_last_min : state.authFailures;
+
+  // real altitude from the simulator feeds the visual scale + HUD;
+  // lat/lon are no longer captured here -- position now comes from the
+  // continuous local propagator (see propagateLEO) so orbital motion
+  // never depends on whether live frames are currently arriving.
+  if (typeof orbit.alt_km === "number") state.altKm = orbit.alt_km;
+
+  if (frame.mode === "normal" || !frame.attack_label) {
+    state.mode = "normal";
+  } else {
+    state.mode = ATTACK_LABEL_TO_MODE[frame.attack_label] || "anomaly";
+  }
+  state.attackLabel = frame.attack_label || null;
+}
+
+connectLive();
+
+function applyModeEffects(dt) {
+  // when live data is flowing, the real simulator IS the source of truth --
+  // skip the synthetic drift/lerp entirely so we don't fight real numbers.
+  if (state.liveData) return;
+
+  if (state.mode === "jamming") {
+    state.signal = THREE.MathUtils.lerp(state.signal, -105, dt * 0.6);
+    state.snr = THREE.MathUtils.lerp(state.snr, 1, dt * 0.6);
+    state.authFailures = THREE.MathUtils.lerp(state.authFailures, 0, dt * 0.8);
+  } else if (state.mode === "blackout") {
+    state.signal = THREE.MathUtils.lerp(state.signal, -140, dt * 0.8);
+    state.snr = THREE.MathUtils.lerp(state.snr, 0, dt * 0.8);
+    state.authFailures = THREE.MathUtils.lerp(state.authFailures, 0, dt * 0.8);
+  } else if (state.mode === "brute_force") {
+    // signal/SNR stay nominal on purpose -- brute force is an auth attack,
+    // not a comms-quality attack, matching the real attack engine's
+    // security_attacks.py signature.
+    state.signal = THREE.MathUtils.lerp(state.signal, -82, dt * 0.5);
+    state.snr = THREE.MathUtils.lerp(state.snr, 14, dt * 0.5);
+    state.authFailures = THREE.MathUtils.lerp(state.authFailures, 32, dt * 1.2) + (Math.random() * 3);
+  } else {
+    state.signal = THREE.MathUtils.lerp(state.signal, -82, dt * 0.5);
+    state.snr = THREE.MathUtils.lerp(state.snr, 14, dt * 0.5);
+    state.authFailures = THREE.MathUtils.lerp(state.authFailures, 0, dt * 0.8);
+  }
+  state.battery = THREE.MathUtils.clamp(state.battery + (Math.random() - 0.5) * 0.02, 60, 100);
+}
+
+// ---------- HUD wiring ----------
+const hudStatus = document.getElementById("hud-status");
+const hudSignal = document.getElementById("hud-signal");
+const hudSnr = document.getElementById("hud-snr");
+const hudBattery = document.getElementById("hud-battery");
+const hudAlt = document.getElementById("hud-alt");
+const hudAuthFail = document.getElementById("hud-authfail");
+
+function updateHUD() {
+  const isAttack = state.mode !== "normal";
+  const labels = {
+    jamming: "SIGNAL JAMMING DETECTED",
+    blackout: "COMM BLACKOUT DETECTED",
+    brute_force: "BRUTE FORCE DETECTED",
+    spoofing: "SIGNAL SPOOFING DETECTED",
+    replay: "REPLAY ATTACK DETECTED",
+    ddos: "DDoS DETECTED",
+    anomaly: "UNCLASSIFIED ANOMALY",
+  };
+  hudStatus.textContent = isAttack ? (labels[state.mode] || "ATTACK DETECTED") : "NOMINAL";
+  hudStatus.className = "value " + (isAttack ? "attack" : "normal");
+  hudSignal.textContent = state.signal.toFixed(1) + " dBm";
+  hudSnr.textContent = state.snr.toFixed(1) + " dB";
+  hudBattery.textContent = Math.round(state.battery) + "%";
+  hudAlt.textContent = state.altKm.toFixed(1) + " km";
+  hudAuthFail.textContent = Math.round(state.authFailures);
+  hudAuthFail.className = "value " + (state.authFailures > 5 ? "attack" : "normal");
+}
+
+// ---------- attack trigger buttons ----------
+const buttons = {
+  normal: document.getElementById("btn-normal"),
+  jam: document.getElementById("btn-jam"),
+  blackout: document.getElementById("btn-blackout"),
+  bruteforce: document.getElementById("btn-bruteforce"),
+};
+const modeForButton = { normal: "normal", jam: "jamming", blackout: "blackout", bruteforce: "brute_force" };
+function setMode(mode) {
+  state.mode = mode;
+  Object.entries(buttons).forEach(([key, btn]) => {
+    btn.classList.toggle("active", modeForButton[key] === mode);
+  });
+}
+buttons.normal.addEventListener("click", () => setMode("normal"));
+buttons.jam.addEventListener("click", () => setMode("jamming"));
+buttons.blackout.addEventListener("click", () => setMode("blackout"));
+buttons.bruteforce.addEventListener("click", () => setMode("brute_force"));
+
+// ---------- animation loop ----------
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  // orbital motion is now ALWAYS continuous and physics-based, using the
+  // page's own clock -- it does not pause when the WebSocket disconnects
+  // or when event_publisher.py stops, exactly like a real satellite keeps
+  // orbiting even when nobody is currently receiving its telemetry.
+  const { lat, lon } = propagateLEO(clock.elapsedTime);
+  const pos = latLonAltToVector3(lat, lon, state.altKm);
+  satellite.position.copy(pos);
+  satellite.lookAt(0, 0, 0);
+  pushTrailPoint(pos);
+  // Earth mesh stays rotation-fixed: the propagator's lat/lon are already
+  // Earth-fixed (ECEF) ground-track coordinates, so independently spinning
+  // the mesh would double-count Earth's rotation.
+
+  applyModeEffects(dt);
+  updateHUD();
+
+  // pulse ring: used for every attack EXCEPT brute_force, which gets its
+  // own intrusion-marker effect below (auth attacks shouldn't look like
+  // signal attacks).
+  const PULSE_COLORS = {
+    jamming: 0xffaa33,
+    blackout: 0xff3333,
+    spoofing: 0xaa66ff,
+    replay: 0xffe066,
+    ddos: 0xff8844,
+    anomaly: 0x66ccff,
+  };
+  const pulse = satellite.userData.pulse;
+  const usesPulse = state.mode !== "normal" && state.mode !== "brute_force";
+  if (usesPulse) {
+    pulse.scale.setScalar(1 + (clock.elapsedTime % 1) * 3);
+    pulse.material.opacity = 0.6 * (1 - (clock.elapsedTime % 1));
+    pulse.material.color.set(PULSE_COLORS[state.mode] || 0x66ccff);
+  } else {
+    pulse.material.opacity = 0;
+  }
+
+  // intrusion markers flicker rapidly and independently during brute force,
+  // visually distinct from the smooth outward pulse used for signal attacks
+  const markers = satellite.userData.intrusionMarkers;
+  markers.children.forEach((dot, i) => {
+    if (state.mode === "brute_force") {
+      const flicker = Math.sin(clock.elapsedTime * 14 + i * 1.7) > 0.3 ? 1 : 0;
+      dot.material.opacity = flicker * 0.9;
+    } else {
+      dot.material.opacity = 0;
+    }
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- resize handling ----------
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>
